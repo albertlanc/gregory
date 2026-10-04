@@ -1,0 +1,176 @@
+{
+    "log": {
+        "loglevel": "warning",
+        "access": "/var/log/xray/access.log",
+        "error": "/var/log/xray/error.log"
+    },
+    "inbounds": [
+        {
+            "listen": "127.0.0.1",
+            "port": 10001,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "c453fc0a-ff50-4ca3-9f3d-9b3580181a44",
+                        "email": "trial-vless-3523"
+                    },
+                    {
+                        "id": "7525cc61-702a-40d8-aaa8-b92fb1e9f6ee",
+                        "email": "trial-vless-7916"
+                    },
+                    {
+                        "id": "8e68e0b3-7696-488c-b9b3-334a265b94c4",
+                        "email": "ahahabs"
+                    },
+                    {
+                        "id": "7c749551-0682-4521-8d06-f3bdba7f55e1",
+                        "email": "trial-vless-6592"
+                    },
+                    {
+                        "id": "24ba1cd9-a91a-4bd7-8e22-8e22563324d4",
+                        "email": "ahaha"
+                    },
+                    {
+                        "id": "a9750fe4-7334-46a2-8065-2cb450cb7303",
+                        "email": "omaie"
+                    }
+                ],
+                "decryption": "none",
+                "fallbacks": [
+                    {
+                        "dest": 10002
+                    },
+                    {
+                        "path": "/vless",
+                        "dest": 10003
+                    },
+                    {
+                        "path": "/vless-xhttp",
+                        "dest": 10004
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                    "path": "/vless"
+                }
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 10002,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "cab857b3-9c15-4291-8859-e4994b27d42b",
+                        "email": "trial-vmess-2338",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "2cd9dadb-91d3-4492-80c7-36b29ec939fb",
+                        "email": "trial-vmess-2741",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "d812644c-9a04-4698-8e63-dbacd9ea45ff",
+                        "email": "trial-vmess-6377",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "f329defe-7055-4745-a4f1-e04342c11934",
+                        "email": "trial-vmess-5461",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "f567ae14-48e5-4f85-ad5e-29c40c99300c",
+                        "email": "trial-vmess-3013",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "0d19d8be-1fbc-40d7-9d22-ed5b5480e117",
+                        "email": "trial-vmess-5331",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "6015172d-33ea-4d24-9fcc-0e4ad86b3d9d",
+                        "email": "trial-vmess-7747",
+                        "alterId": 0
+                    },
+                    {
+                        "id": "4376750f-3148-4ae1-ad12-59c1d92f7c1d",
+                        "email": "ghu",
+                        "alterId": 0
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                    "path": "/vmess"
+                }
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 10003,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "10b4d23d289c",
+                        "email": "ahahaba"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                    "path": "/trojan"
+                }
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 10085,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "127.0.0.1"
+            },
+            "tag": "api"
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {}
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "blocked"
+        }
+    ],
+    "stats": {},
+    "api": {
+        "tag": "api",
+        "services": [
+            "StatsService"
+        ]
+    },
+    "routing": {
+        "rules": [
+            {
+                "type": "field",
+                "inboundTag": [
+                    "api"
+                ],
+                "outboundTag": "api"
+            }
+        ]
+    }
+}

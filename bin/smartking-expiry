@@ -1,0 +1,111 @@
+#!/bin/bash
+# SMARTKING - XRAY MINUTE-BY-MINUTE TIME & QUOTA AUTO-KILL DAEMON
+
+TODAY=$(date +%Y-%m-%d)
+
+# 1. SSH Account Sweep
+if [ -f /etc/smartking/ssh-accounts.txt ]; then
+    while IFS='|' read -r user pass quota expiry; do
+        if [[ "$expiry" < "$TODAY" ]] && [[ -n "$expiry" ]]; then
+            userdel -f "$user" 2>/dev/null
+            sed -i "/^$user|/d" /etc/smartking/ssh-accounts.txt
+        fi
+    done < /etc/smartking/ssh-accounts.txt
+fi
+
+# 2. Xray Time & Quota Sweep (VMESS, VLESS, TROJAN)
+python3 -c '
+import json, os, subprocess, re
+from datetime import datetime
+
+now = datetime.now()
+changed = False
+cfg_file = "/etc/xray/config.json"
+
+try:
+    with open(cfg_file, "r") as f:
+        cfg = json.load(f)
+except:
+    exit(0)
+
+# Fetch live traffic stats from Xray API
+traffic_data = {}
+try:
+    res = subprocess.run(["xray", "api", "statsquery", "--server=127.0.0.1:10085", ""], capture_output=True, text=True, timeout=3)
+    if res.returncode == 0:
+        stats_json = json.loads(res.stdout)
+        for stat in stats_json.get("stat", []):
+            name = stat.get("name", "")
+            value = stat.get("value", 0)
+            # Format: user>>>(email)>>>traffic>>>downlink or uplink
+            m = re.search(r"user>>>(.*?)>>>traffic>>>(up|down)link", name)
+            if m:
+                email = m.group(1)
+                traffic_data[email] = traffic_data.get(email, 0) + value
+except:
+    pass
+
+def parse_quota_bytes(q_str):
+    if not q_str or "unlimited" in q_str.lower():
+        return float("inf")
+    num = float(re.findall(r"\d+", q_str)[0])
+    if "gb" in q_str.lower():
+        return num * 1024 * 1024 * 1024
+    elif "mb" in q_str.lower():
+        return num * 1024 * 1024
+    return float("inf")
+
+for p in ["vmess", "vless", "trojan"]:
+    txt = f"/etc/smartking/{p}-accounts.txt"
+    if not os.path.exists(txt): continue
+    
+    valid_lines = []
+    with open(txt, "r") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) >= 4:
+                u, uuid, exp, quota = parts[0], parts[1], parts[2], parts[3]
+                purge = False
+                reason = ""
+                
+                # Check Time Expiration
+                try:
+                    if len(exp) > 10:
+                        dt = datetime.strptime(exp, "%Y-%m-%d %H:%M")
+                    else:
+                        dt = datetime.strptime(exp, "%Y-%m-%d")
+                    if now >= dt:
+                        purge = True
+                        reason = "Time Expired"
+                except:
+                    pass
+                
+                # Check Data Quota Expiration
+                if not purge and quota:
+                    max_bytes = parse_quota_bytes(quota)
+                    used_bytes = traffic_data.get(u, 0)
+                    if used_bytes >= max_bytes:
+                        purge = True
+                        reason = "Quota Exceeded"
+                
+                if purge:
+                    for inbound in cfg.get("inbounds", []):
+                        clients = inbound.setdefault("settings", {}).setdefault("clients", [])
+                        original_len = len(clients)
+                        inbound["settings"]["clients"] = [c for c in clients if c.get("id") != uuid and c.get("password"] != uuid and c.get("email") != u]
+                        if len(inbound["settings"]["clients"]) < original_len:
+                            changed = True
+                else:
+                    valid_lines.append(line)
+            else:
+                valid_lines.append(line)
+                
+    with open(txt, "w") as f:
+        for v in valid_lines:
+            f.write(v)
+
+if changed:
+    with open(cfg_file, "w") as f:
+        json.dump(cfg, f, indent=4)
+    subprocess.run(["systemctl", "restart", "xray"])
+'
