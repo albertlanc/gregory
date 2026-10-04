@@ -95,7 +95,6 @@ iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5300
 
 # 8. DROPBEAR & MULTI-PORT STUNNEL (Resolving Port Conflicts)
-# Dropbear listens on 109 and 143. Xray handles 443. Stunnel handles 2053, 2083, 8443.
 echo "[+] Configuring Dropbear & Stunnel Multi-Ports..."
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=109/g' /etc/default/dropbear
@@ -149,22 +148,38 @@ echo "[+] Installing Xray Core & Hysteria 2..."
 bash <(curl -fsSL https://app.hysteria.network/get.sh)
 bash -c "\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 12. DEPLOY REPOSITORY FILES
+# 12. DEPLOY REPOSITORY FILES (WITH DYNAMIC MENU MAPPER FIX)
 echo "[+] Deploying SmartKing Panel Files..."
 REPO_DIR=\$(pwd)
-cp -f \$REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
-cp -f \$REPO_DIR/config/xray-config.json /etc/xray/config.json
-sed -i "s/example.com/\$DOMAIN/g" /etc/nginx/sites-available/default
+if [ -f "\$REPO_DIR/config/nginx-default.conf" ]; then
+    cp -f \$REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
+fi
+if [ -f "\$REPO_DIR/config/xray-config.json" ]; then
+    cp -f \$REPO_DIR/config/xray-config.json /etc/xray/config.json
+fi
+sed -i "s/example.com/\$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
 
 mkdir -p /etc/smartking/menus /var/log/smartking
-cp -f \$REPO_DIR/smartking/account_templates.sh /etc/smartking/
-cp -f \$REPO_DIR/smartking/menus/*.sh /etc/smartking/menus/
-chmod +x /etc/smartking/menus/*.sh
-ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu 2>/dev/null || true
+if [ -d "\$REPO_DIR/smartking" ]; then
+    cp -f \$REPO_DIR/smartking/account_templates.sh /etc/smartking/ 2>/dev/null || true
+    cp -f \$REPO_DIR/smartking/menus/*.sh /etc/smartking/menus/ 2>/dev/null || true
+fi
+chmod +x /etc/smartking/menus/*.sh 2>/dev/null || true
+
+# Dynamic Menu Linker (Guarantees 'menu' command maps correctly on fresh VMs)
+MAIN_SCRIPT=\$(find /etc/smartking/menus/ -type f -name "*.sh" | grep -E "service|main|menu" | head -n 1)
+if [ -n "\$MAIN_SCRIPT" ]; then
+    ln -sf "\$MAIN_SCRIPT" /usr/local/bin/menu
+else
+    ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu
+fi
+chmod +x /usr/local/bin/menu
 
 # 13. AUTO-KILL EXPIRY DAEMON
-cp -f \$REPO_DIR/bin/smartking-expiry /usr/local/bin/smartking-expiry
-chmod +x /usr/local/bin/smartking-expiry
+if [ -f "\$REPO_DIR/bin/smartking-expiry" ]; then
+    cp -f \$REPO_DIR/bin/smartking-expiry /usr/local/bin/smartking-expiry
+    chmod +x /usr/local/bin/smartking-expiry
+fi
 (crontab -l 2>/dev/null | grep -v "smartking-expiry"; echo "* * * * * /usr/local/bin/smartking-expiry") | crontab -
 
 # 14. START ALL SERVICES
