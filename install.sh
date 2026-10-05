@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # SMARTKING V2 (TECHFEEDS ELITE) - ZERO-MISTAKE AUTO-INSTALLER
-# OS: Ubuntu 24.04 LTS
+# OS: Ubuntu 20.04 / 22.04 / 24.04 LTS
 # ==============================================================================
 clear
 echo "======================================================"
@@ -12,13 +12,13 @@ read -p " Enter your Main Domain (e.g., vpn.example.com) : " DOMAIN
 read -p " Enter your NameServer for SlowDNS (e.g., ns.example.com) : " NS_DOMAIN
 echo ""
 
-# 1. CORE DEPENDENCIES
+# 1. CORE DEPENDENCIES (Swapped 'awk' for 'gawk' to prevent fatal crash)
 echo "[+] Installing Elite Libraries & Dependencies..."
 apt-get update -y && apt-get upgrade -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y git curl wget unzip python3 python3-pip \
-nginx cron uuid-runtime tzdata sed awk stunnel4 dropbear openvpn easy-rsa socat \
+nginx cron uuid-runtime tzdata sed gawk stunnel4 dropbear openvpn easy-rsa socat \
 iptables iptables-persistent netfilter-persistent cmake make gcc g++ build-essential \
-libsqlite3-dev golang libssl-dev squid ufw sslh
+libsqlite3-dev libssl-dev squid ufw sslh
 
 # 2. IP FORWARDING
 echo "[+] Configuring Kernel IP Forwarding..."
@@ -73,23 +73,38 @@ INNER_EOF
 systemctl enable badvpn-$port
 done
 
-# 7. SLOWDNS (DNSTT)
-echo "[+] Compiling SlowDNS (DNSTT)..."
+# 7. SLOWDNS (DNSTT) - FORCED GO 1.21 & HARDCODED PATH FIX
+echo "[+] Installing Go 1.21 & Compiling SlowDNS (DNSTT)..."
+wget -q https://go.dev/dl/go1.21.6.linux-amd64.tar.gz
+rm -rf /usr/local/go
+tar -C /usr/local -xzf go1.21.6.linux-amd64.tar.gz
+ln -sf /usr/local/go/bin/go /usr/bin/go
+rm -f go1.21.6.linux-amd64.tar.gz
+
 cd /root
 rm -rf dnstt
 git clone https://github.com/OutlineFoundation/dnstt.git
-cd dnstt
-go build -o dnstt-server ./dnstt-server
-cp dnstt-server /usr/local/bin/
-mkdir -p /etc/slowdns && cd /etc/slowdns
-/usr/local/bin/dnstt-server -gen-key -privkey-file priv.key -pubkey-file pub.key
-PRIV_KEY=$(cat priv.key)
-PUB_KEY=$(cat pub.key)
+cd dnstt/dnstt-server
+go mod tidy
+go build -o dns-server
+
+# Deploy binary to all possible paths to satisfy the panel logic
+mkdir -p /etc/slowdns
+cp dns-server /etc/slowdns/dns-server
+cp dns-server /usr/local/bin/dns-server
+cp dns-server /usr/local/bin/dnstt-server
+chmod +x /etc/slowdns/dns-server /usr/local/bin/dns-server /usr/local/bin/dnstt-server
+
+cd /etc/slowdns
+/etc/slowdns/dns-server -gen-key -privkey-file server.key -pubkey-file server.pub
+PRIV_KEY=$(cat server.key)
+PUB_KEY=$(cat server.pub)
+
 cat << INNER_EOF > /etc/systemd/system/slowdns.service
 [Unit]
 Description=SlowDNS DNSTT Server
 [Service]
-ExecStart=/usr/local/bin/dnstt-server -udp :5300 -privkey-file /etc/slowdns/priv.key $NS_DOMAIN 127.0.0.1:109
+ExecStart=/etc/slowdns/dns-server -udp :5300 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:109
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -101,7 +116,7 @@ iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5300
 echo "[+] Configuring Dropbear & Stunnel..."
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=109/g' /etc/default/dropbear
-echo "DROPBEAR_EXTRA_ARGS=\"-p 143\"" >> /etc/default/dropbear
+grep -q 'DROPBEAR_EXTRA_ARGS="-p 143"' /etc/default/dropbear || echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
 
 cat << INNER_EOF > /etc/stunnel/stunnel.conf
 pid = /var/run/stunnel.pid
@@ -151,7 +166,7 @@ echo "[+] Installing Xray Core & Hysteria 2..."
 bash <(curl -fsSL https://app.hysteria.network/get.sh)
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 12. DEPLOY REPOSITORY FILES
+# 12. DEPLOY REPOSITORY FILES (INCLUDES ACCOUNT TRACKING & MENU LINKS)
 echo "[+] Deploying SmartKing Panel Files..."
 REPO_DIR=$(pwd)
 if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
@@ -162,12 +177,25 @@ if [ -f "$REPO_DIR/config/xray-config.json" ]; then
 fi
 sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
 
+# Generate missing tracking databases to prevent header UI errors
 mkdir -p /etc/smartking/menus /var/log/smartking
+touch /etc/smartking/vless-accounts.txt \
+      /etc/smartking/vmess-accounts.txt \
+      /etc/smartking/trojan-accounts.txt \
+      /etc/smartking/shadowsocks-accounts.txt \
+      /etc/smartking/ssh-accounts.txt
+
 if [ -d "$REPO_DIR/smartking" ]; then
     cp -f $REPO_DIR/smartking/account_templates.sh /etc/smartking/ 2>/dev/null || true
     cp -f $REPO_DIR/smartking/menus/*.sh /etc/smartking/menus/ 2>/dev/null || true
 fi
-chmod +x /etc/smartking/menus/*.sh 2>/dev/null || true
+
+# Automatically inject the template library into ALL menus so functions always load
+for menu in /etc/smartking/menus/*.sh; do
+    grep -q "account_templates.sh" "$menu" || sed -i '2i source /etc/smartking/account_templates.sh 2>/dev/null' "$menu"
+done
+
+chmod +x /etc/smartking/account_templates.sh /etc/smartking/menus/*.sh 2>/dev/null || true
 
 MAIN_SCRIPT=$(find /etc/smartking/menus/ -type f -name "*.sh" | grep -E "service|main|menu" | head -n 1)
 if [ -n "$MAIN_SCRIPT" ]; then
