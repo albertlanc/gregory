@@ -73,7 +73,7 @@ INNER_EOF
 systemctl enable badvpn-$port
 done
 
-# 7. SLOWDNS (DNSTT) - FORCED GO 1.21 & HARDCODED PATH FIX
+# 7. SLOWDNS (DNSTT) - FIXED TO POINT DROPBEAR TO PORT 143 & FIREWALL RULES
 echo "[+] Installing Go 1.21 & Compiling SlowDNS (DNSTT)..."
 wget -q https://go.dev/dl/go1.21.6.linux-amd64.tar.gz
 rm -rf /usr/local/go
@@ -88,7 +88,6 @@ cd dnstt/dnstt-server
 go mod tidy
 go build -o dns-server
 
-# Deploy binary to all possible paths to satisfy the panel logic
 mkdir -p /etc/slowdns
 cp dns-server /etc/slowdns/dns-server
 cp dns-server /usr/local/bin/dns-server
@@ -104,18 +103,98 @@ cat << INNER_EOF > /etc/systemd/system/slowdns.service
 [Unit]
 Description=SlowDNS DNSTT Server
 [Service]
-ExecStart=/etc/slowdns/dns-server -udp :5300 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:109
+ExecStart=/etc/slowdns/dns-server -udp :5300 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:143
 Restart=always
 [Install]
 WantedBy=multi-user.target
 INNER_EOF
+
 iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5300
+iptables -A INPUT -p udp --dport 53 -j ACCEPT
+ip6tables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+netfilter-persistent save
+
+# 7.5 PYTHON SSHWS BRIDGE (PORT 8085 -> DROPBEAR 143)
+echo "[+] Deploying Python SSHWS Header-Stripper Bridge..."
+cat << 'EOF' > /usr/local/bin/sshws_final_bridge.py
+import socket
+import threading
+
+def handle_client(client_sock):
+    try:
+        target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target_sock.connect(('127.0.0.1', 143))
+        
+        request_data = b""
+        while b"\r\n\r\n" not in request_data:
+            chunk = client_sock.recv(4096)
+            if not chunk:
+                break
+            request_data += chunk
+        
+        header_end_idx = request_data.find(b"\r\n\r\n")
+        if header_end_idx != -1:
+            initial_payload = request_data[header_end_idx + 4:]
+            if initial_payload:
+                target_sock.sendall(initial_payload)
+        
+        def forward(src, dst):
+            try:
+                while True:
+                    data = src.recv(4096)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except:
+                pass
+            finally:
+                src.close()
+                dst.close()
+
+        t1 = threading.Thread(target=forward, args=(client_sock, target_sock))
+        t2 = threading.Thread(target=forward, args=(target_sock, client_sock))
+        t1.start()
+        t2.start()
+    except Exception:
+        client_sock.close()
+
+def server_loop():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('127.0.0.1', 8085))
+    server.listen(200)
+    while True:
+        client_sock, _ = server.accept()
+        threading.Thread(target=handle_client, args=(client_sock,)).start()
+
+if __name__ == "__main__":
+    server_loop()
+EOF
+
+cat << 'EOF' > /etc/systemd/system/sshws-final-bridge.service
+[Unit]
+Description=SmartKing Final SSHWS Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/sshws_final_bridge.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable sshws-final-bridge
 
 # 8. DROPBEAR & MULTI-PORT STUNNEL
 echo "[+] Configuring Dropbear & Stunnel..."
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=109/g' /etc/default/dropbear
+sed -i 's/-w//g' /etc/default/dropbear
 grep -q 'DROPBEAR_EXTRA_ARGS="-p 143"' /etc/default/dropbear || echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
 
 cat << INNER_EOF > /etc/stunnel/stunnel.conf
@@ -159,9 +238,9 @@ echo "[+] Configuring UDP Custom Routing rules..."
 iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-iptables-save > /etc/iptables/rules.v4
+netfilter-persistent save
 
-# 11. HAPROXY & XRAY CORE WITH MASTER VLESS FALLBACKS
+# 11. HAPROXY & XRAY CORE WITH WORKING MASTER VLESS FALLBACKS
 echo "[+] Installing Xray Core & Hysteria 2..."
 bash <(curl -fsSL https://app.hysteria.network/get.sh)
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -188,21 +267,18 @@ defaults
     timeout client 30m
     timeout server 30m
 
-# PORT 443: TLS / SECURE TRAFFIC MULTIPLEXER
 frontend port_443_in
     bind *:443
     mode tcp
     option tcplog
     default_backend xray_tls_backend
 
-# PORT 80: NON-TLS / HTTP TRAFFIC MULTIPLEXER
 frontend port_80_in
     bind *:80
     mode tcp
     option tcplog
     default_backend xray_nontls_backend
 
-# BACKENDS (LOCAL XRAY SERVICE PORTS)
 backend xray_tls_backend
     mode tcp
     balance source
@@ -230,13 +306,16 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
       "protocol": "vless",
       "settings": {
         "clients": [
-          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" },
+          { "id": "2aaaa649-1520-4117-ac3a-43eb52637932", "email": "trial-vless-4603" }
         ],
         "decryption": "none",
         "fallbacks": [
+          { "path": "/sshws", "dest": 8085 },
           { "path": "/trojan", "dest": 8083 },
           { "path": "/vless", "dest": 8082 },
-          { "path": "/vmess", "dest": 8081 }
+          { "path": "/vmess", "dest": 8081 },
+          { "dest": 8083 }
         ]
       },
       "streamSettings": {
@@ -255,13 +334,16 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
       "protocol": "vless",
       "settings": {
         "clients": [
-          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" },
+          { "id": "2aaaa649-1520-4117-ac3a-43eb52637932", "email": "trial-vless-4603" }
         ],
         "decryption": "none",
         "fallbacks": [
+          { "path": "/sshws", "dest": 8085 },
           { "path": "/trojan", "dest": 8083 },
           { "path": "/vless", "dest": 8082 },
-          { "path": "/vmess", "dest": 8081 }
+          { "path": "/vmess", "dest": 8081 },
+          { "dest": 8083 }
         ]
       },
       "streamSettings": {
@@ -275,13 +357,12 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
       "protocol": "vless",
       "settings": {
         "clients": [
-          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+          { "id": "2aaaa649-1520-4117-ac3a-43eb52637932", "email": "trial-vless-4603" }
         ],
         "decryption": "none"
       },
       "streamSettings": {
         "network": "ws",
-        "security": "none",
         "wsSettings": { "path": "/vless" }
       }
     },
@@ -291,7 +372,7 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
       "protocol": "vmess",
       "settings": {
         "clients": [
-          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "alterId": 0, "email": "dummy" }
+          { "id": "6b4e6fac-08a7-4314-a4d6-d10d37f93be6", "alterId": 0, "email": "trial-vmess-4499" }
         ]
       },
       "streamSettings": {
@@ -306,9 +387,8 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
       "protocol": "trojan",
       "settings": {
         "clients": [
-          { "password": "dummy-password", "email": "dummy" }
-        ],
-        "decryption": "none"
+          { "password": "ac721819-70e6-4704-a4fb-6b4f40397210", "email": "trial-trojan-5848" }
+        ]
       },
       "streamSettings": {
         "network": "ws",
@@ -323,25 +403,17 @@ cat << 'EOF' > /usr/local/etc/xray/config.json
 }
 EOF
 
-echo -e "[*] Linking Xray Config to SmartKing Panel..."
-rm -f /etc/xray/config.json
-ln -s /usr/local/etc/xray/config.json /etc/xray/config.json
+ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
 
-# 12. DEPLOY REPOSITORY FILES (INCLUDES ACCOUNT TRACKING & MENU LINKS)
+# 12. DEPLOY REPOSITORY FILES
 echo "[+] Deploying SmartKing Panel Files..."
 REPO_DIR=$(pwd)
 if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
     cp -f $REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
 fi
 
-# We don't overwrite config.json here anymore since HAProxy/Xray generation handles it natively.
-# if [ -f "$REPO_DIR/config/xray-config.json" ]; then
-#     cp -f $REPO_DIR/config/xray-config.json /etc/xray/config.json
-# fi
-
 sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
 
-# Generate missing tracking databases to prevent header UI errors
 mkdir -p /etc/smartking/menus /var/log/smartking
 touch /etc/smartking/vless-accounts.txt \
       /etc/smartking/vmess-accounts.txt \
@@ -354,7 +426,6 @@ if [ -d "$REPO_DIR/smartking" ]; then
     cp -f $REPO_DIR/smartking/menus/*.sh /etc/smartking/menus/ 2>/dev/null || true
 fi
 
-# Automatically inject the template library into ALL menus so functions always load
 for menu in /etc/smartking/menus/*.sh; do
     grep -q "account_templates.sh" "$menu" || sed -i '2i source /etc/smartking/account_templates.sh 2>/dev/null' "$menu"
 done
@@ -379,8 +450,8 @@ fi
 # 14. START ALL SERVICES
 echo "[+] Starting all Elite Services..."
 systemctl daemon-reload
-systemctl enable haproxy nginx xray stunnel4 dropbear openvpn hysteria-server slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
-systemctl restart haproxy nginx xray stunnel4 dropbear slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl enable haproxy nginx xray stunnel4 dropbear openvpn hysteria-server slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl restart haproxy nginx xray stunnel4 dropbear slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
 
 clear
 echo "======================================================"
