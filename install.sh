@@ -18,7 +18,7 @@ apt-get update -y && apt-get upgrade -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y git curl wget unzip python3 python3-pip \
 nginx cron uuid-runtime tzdata sed gawk stunnel4 dropbear openvpn easy-rsa socat \
 iptables iptables-persistent netfilter-persistent cmake make gcc g++ build-essential \
-libsqlite3-dev libssl-dev squid ufw sslh
+libsqlite3-dev libssl-dev squid ufw sslh haproxy
 
 # 2. IP FORWARDING
 echo "[+] Configuring Kernel IP Forwarding..."
@@ -161,10 +161,171 @@ iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
 iptables-save > /etc/iptables/rules.v4
 
-# 11. XRAY CORE & HYSTERIA 2
+# 11. HAPROXY & XRAY CORE WITH MASTER VLESS FALLBACKS
 echo "[+] Installing Xray Core & Hysteria 2..."
 bash <(curl -fsSL https://app.hysteria.network/get.sh)
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+echo -e "[*] Configuring HAProxy Multiplexer..."
+cat << 'EOF' > /etc/haproxy/haproxy.cfg
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    daemon
+    maxconn 65535
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout queue 1m
+    timeout connect 10s
+    timeout client 30m
+    timeout server 30m
+
+# PORT 443: TLS / SECURE TRAFFIC MULTIPLEXER
+frontend port_443_in
+    bind *:443
+    mode tcp
+    option tcplog
+    default_backend xray_tls_backend
+
+# PORT 80: NON-TLS / HTTP TRAFFIC MULTIPLEXER
+frontend port_80_in
+    bind *:80
+    mode tcp
+    option tcplog
+    default_backend xray_nontls_backend
+
+# BACKENDS (LOCAL XRAY SERVICE PORTS)
+backend xray_tls_backend
+    mode tcp
+    balance source
+    server xray_tls 127.0.0.1:4433 check
+
+backend xray_nontls_backend
+    mode tcp
+    balance source
+    server xray_nontls 127.0.0.1:8080 check
+EOF
+
+echo -e "[*] Configuring Master VLESS Fallback Xray Template..."
+mkdir -p /usr/local/etc/xray/
+mkdir -p /etc/xray/
+
+cat << 'EOF' > /usr/local/etc/xray/config.json
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 4433,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+        ],
+        "decryption": "none",
+        "fallbacks": [
+          { "path": "/trojan", "dest": 8083 },
+          { "path": "/vless", "dest": 8082 },
+          { "path": "/vmess", "dest": 8081 }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            { "certificateFile": "/etc/xray/xray.crt", "keyFile": "/etc/xray/xray.key" }
+          ]
+        }
+      }
+    },
+    {
+      "port": 8080,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+        ],
+        "decryption": "none",
+        "fallbacks": [
+          { "path": "/trojan", "dest": 8083 },
+          { "path": "/vless", "dest": 8082 },
+          { "path": "/vmess", "dest": 8081 }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "none"
+      }
+    },
+    {
+      "port": 8082,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "email": "dummy" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": { "path": "/vless" }
+      }
+    },
+    {
+      "port": 8081,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          { "id": "2b92642a-a92d-45fc-9a1b-36f663045610", "alterId": 0, "email": "dummy" }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": { "path": "/vmess" }
+      }
+    },
+    {
+      "port": 8083,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
+      "settings": {
+        "clients": [
+          { "password": "dummy-password", "email": "dummy" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": { "path": "/trojan" }
+      }
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom" }
+  ]
+}
+EOF
+
+echo -e "[*] Linking Xray Config to SmartKing Panel..."
+rm -f /etc/xray/config.json
+ln -s /usr/local/etc/xray/config.json /etc/xray/config.json
 
 # 12. DEPLOY REPOSITORY FILES (INCLUDES ACCOUNT TRACKING & MENU LINKS)
 echo "[+] Deploying SmartKing Panel Files..."
@@ -172,9 +333,12 @@ REPO_DIR=$(pwd)
 if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
     cp -f $REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
 fi
-if [ -f "$REPO_DIR/config/xray-config.json" ]; then
-    cp -f $REPO_DIR/config/xray-config.json /etc/xray/config.json
-fi
+
+# We don't overwrite config.json here anymore since HAProxy/Xray generation handles it natively.
+# if [ -f "$REPO_DIR/config/xray-config.json" ]; then
+#     cp -f $REPO_DIR/config/xray-config.json /etc/xray/config.json
+# fi
+
 sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
 
 # Generate missing tracking databases to prevent header UI errors
@@ -215,8 +379,8 @@ fi
 # 14. START ALL SERVICES
 echo "[+] Starting all Elite Services..."
 systemctl daemon-reload
-systemctl enable nginx xray stunnel4 dropbear openvpn hysteria-server slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
-systemctl restart nginx xray stunnel4 dropbear slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl enable haproxy nginx xray stunnel4 dropbear openvpn hysteria-server slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl restart haproxy nginx xray stunnel4 dropbear slowdns squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
 
 clear
 echo "======================================================"
