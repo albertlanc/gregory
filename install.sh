@@ -16,7 +16,7 @@ echo "[+] Verifying Server License..."
 SERVER_IP=$(curl -s http://ipv4.icanhazip.com)
 
 # Change this URL to the raw link of your licensed_ips.txt file on GitHub or your web server
-LICENSE_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO/main/licensed_ips.txt"
+LICENSE_URL="https://raw.githubusercontent.com/albertlanc/gregory/refs/heads/main/licensed_ips.txt"
 
 AUTH_CHECK=$(curl -sL "$LICENSE_URL" | grep -w "$SERVER_IP")
 
@@ -433,14 +433,9 @@ EOF
 
 ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
 
-# 12. DEPLOY REPOSITORY FILES
-echo "[+] Deploying SmartKing Panel Files..."
-REPO_DIR=$(pwd)
-if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
-    cp -f $REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
-fi
-
-sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
+# 12. DEPLOY REPOSITORY FILES (FIXED TO PULL GREGORY & MENU.SH PERFECTLY)
+echo "[+] Fetching SmartKing Panel Files from GitHub..."
+git clone https://github.com/albertlanc/gregory.git /tmp/gregory_repo
 
 mkdir -p /etc/smartking/menus /var/log/smartking
 touch /etc/smartking/vless-accounts.txt \
@@ -449,9 +444,14 @@ touch /etc/smartking/vless-accounts.txt \
       /etc/smartking/shadowsocks-accounts.txt \
       /etc/smartking/ssh-accounts.txt
 
-if [ -d "$REPO_DIR/smartking" ]; then
-    cp -f $REPO_DIR/smartking/account_templates.sh /etc/smartking/ 2>/dev/null || true
-    cp -f $REPO_DIR/smartking/menus/*.sh /etc/smartking/menus/ 2>/dev/null || true
+if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
+    cp -f $REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
+fi
+sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
+
+if [ -d "/tmp/gregory_repo/smartking" ]; then
+    cp -f /tmp/gregory_repo/smartking/account_templates.sh /etc/smartking/ 2>/dev/null || true
+    cp -f /tmp/gregory_repo/smartking/menus/*.sh /etc/smartking/menus/ 2>/dev/null || true
 fi
 
 for menu in /etc/smartking/menus/*.sh; do
@@ -460,13 +460,12 @@ done
 
 chmod +x /etc/smartking/account_templates.sh /etc/smartking/menus/*.sh 2>/dev/null || true
 
-MAIN_SCRIPT=$(find /etc/smartking/menus/ -type f -name "*.sh" | grep -E "service|main|menu" | head -n 1)
-if [ -n "$MAIN_SCRIPT" ]; then
-    ln -sf "$MAIN_SCRIPT" /usr/local/bin/menu
-else
-    ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu
-fi
-chmod +x /usr/local/bin/menu
+# Hardcode explicit mappings matching your working VM layout
+ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu
+cp /etc/smartking/menus/menu.sh /etc/smartking/menu.sh 2>/dev/null || true
+chmod +x /etc/smartking/menu.sh /usr/local/bin/menu
+
+rm -rf /tmp/gregory_repo
 
 # 13. AUTO-KILL EXPIRY DAEMON
 if [ -f "$REPO_DIR/bin/smartking-expiry" ]; then
