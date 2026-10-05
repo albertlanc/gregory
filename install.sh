@@ -8,11 +8,39 @@ echo "======================================================"
 echo "    SMARTKING PREMIUM AUTO-INSTALLER (ZERO-CONFLICT)  "
 echo "======================================================"
 echo ""
+
+# ==============================================================================
+# 0. IP-BASED LICENSE VERIFICATION
+# ==============================================================================
+echo "[+] Verifying Server License..."
+SERVER_IP=$(curl -s http://ipv4.icanhazip.com)
+
+# Change this URL to the raw link of your licensed_ips.txt file on GitHub or your web server
+LICENSE_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO/main/licensed_ips.txt"
+
+AUTH_CHECK=$(curl -sL "$LICENSE_URL" | grep -w "$SERVER_IP")
+
+if [ -z "$AUTH_CHECK" ]; then
+    echo ""
+    echo "======================================================"
+    echo " [X] ACCESS DENIED: Unregistered IP Address"
+    echo " Your Server IP: $SERVER_IP"
+    echo " Please contact the administrator to purchase or renew."
+    echo "======================================================"
+    echo ""
+    exit 1
+fi
+
+echo "[+] License Validated for IP: $SERVER_IP. Proceeding..."
+echo "======================================================"
+echo ""
+
+# Proceed to prompts only if license is valid
 read -p " Enter your Main Domain (e.g., vpn.example.com) : " DOMAIN
 read -p " Enter your NameServer for SlowDNS (e.g., ns.example.com) : " NS_DOMAIN
 echo ""
 
-# 1. CORE DEPENDENCIES (Swapped 'awk' for 'gawk' to prevent fatal crash)
+# 1. CORE DEPENDENCIES
 echo "[+] Installing Elite Libraries & Dependencies..."
 apt-get update -y && apt-get upgrade -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y git curl wget unzip python3 python3-pip \
