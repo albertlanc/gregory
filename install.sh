@@ -37,6 +37,13 @@ read -p " Enter your Main Domain (e.g., vpn.example.com) : " DOMAIN
 read -p " Enter your NameServer for SlowDNS (e.g., ns.example.com) : " NS_DOMAIN
 echo ""
 
+# PERSIST DOMAIN & NAMESERVER FOR THE MENUS INSTANTLY
+mkdir -p /etc/smartking /etc/xray /etc/slowdns
+echo "$DOMAIN" > /etc/xray/domain
+echo "$DOMAIN" > /etc/smartking/domain
+echo "$NS_DOMAIN" > /etc/slowdns/nsdomain
+echo "$NS_DOMAIN" > /etc/smartking/nsdomain
+
 # 1. CORE DEPENDENCIES
 echo "[+] Installing Elite Libraries & Dependencies..."
 apt-get update -y && apt-get upgrade -y
@@ -518,6 +525,7 @@ echo "======================================================"
 echo "    ELITE INSTALLATION COMPLETELY SUCCESSFUL!"
 echo "======================================================"
 echo " Domain Configured    : $DOMAIN"
+echo " NameServer Configured: $NS_DOMAIN"
 echo " OVPN Config Server   : http://$DOMAIN:81"
 echo " SSL/Stunnel Ports    : 2053, 2083, 8443"
 echo " Squid Proxy Port     : 3128"
