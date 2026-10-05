@@ -15,9 +15,7 @@ echo ""
 echo "[+] Verifying Server License..."
 SERVER_IP=$(curl -s http://ipv4.icanhazip.com)
 
-# Change this URL to the raw link of your licensed_ips.txt file on GitHub or your web server
 LICENSE_URL="https://raw.githubusercontent.com/albertlanc/gregory/refs/heads/main/licensed_ips.txt"
-
 AUTH_CHECK=$(curl -sL "$LICENSE_URL" | grep -w "$SERVER_IP")
 
 if [ -z "$AUTH_CHECK" ]; then
@@ -35,7 +33,6 @@ echo "[+] License Validated for IP: $SERVER_IP. Proceeding..."
 echo "======================================================"
 echo ""
 
-# Proceed to prompts only if license is valid
 read -p " Enter your Main Domain (e.g., vpn.example.com) : " DOMAIN
 read -p " Enter your NameServer for SlowDNS (e.g., ns.example.com) : " NS_DOMAIN
 echo ""
@@ -101,7 +98,7 @@ INNER_EOF
 systemctl enable badvpn-$port
 done
 
-# 7. SLOWDNS (DNSTT) - FIXED TO POINT DROPBEAR TO PORT 143 & FIREWALL RULES
+# 7. SLOWDNS (DNSTT)
 echo "[+] Installing Go 1.21 & Compiling SlowDNS (DNSTT)..."
 wget -q https://go.dev/dl/go1.21.6.linux-amd64.tar.gz
 rm -rf /usr/local/go
@@ -248,9 +245,9 @@ connect = 127.0.0.1:1194
 INNER_EOF
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
 
-# 9. OPENVPN CONFIG SERVER
-echo "[+] Configuring Nginx OpenVPN Port 81 Server..."
-mkdir -p /var/www/html/ovpn
+# 9. OPENVPN CONFIG SERVER & BASE SETUP
+echo "[+] Configuring Nginx OpenVPN Port 81 Server & Base OpenVPN..."
+mkdir -p /var/www/html/ovpn /etc/openvpn
 cat << 'INNER_EOF' > /etc/nginx/sites-available/ovpn
 server {
     listen 81;
@@ -260,6 +257,29 @@ server {
 }
 INNER_EOF
 ln -sf /etc/nginx/sites-available/ovpn /etc/nginx/sites-enabled/
+
+cat << 'EOF' > /etc/openvpn/server.conf
+port 1194
+proto tcp
+dev tun
+topology subnet
+server 10.8.0.0 255.255.255.0
+keepalive 10 60
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+auth SHA256
+cipher AES-256-CBC
+ca /etc/openvpn/ca.crt
+cert /etc/openvpn/server.crt
+key /etc/openvpn/server.key
+dh /etc/openvpn/dh.pem
+EOF
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/openvpn/server.key -out /etc/openvpn/server.crt -subj "/CN=OpenVPN-CA" 2>/dev/null
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/openvpn/ca.crt -out /etc/openvpn/ca.crt -subj "/CN=OpenVPN-Root" 2>/dev/null
+touch /etc/openvpn/dh.pem
 
 # 10. UDP CUSTOM ROUTING
 echo "[+] Configuring UDP Custom Routing rules..."
@@ -319,8 +339,7 @@ backend xray_nontls_backend
 EOF
 
 echo -e "[*] Configuring Master VLESS Fallback Xray Template..."
-mkdir -p /usr/local/etc/xray/
-mkdir -p /etc/xray/
+mkdir -p /usr/local/etc/xray/ /etc/xray/
 
 cat << 'EOF' > /usr/local/etc/xray/config.json
 {
@@ -433,7 +452,7 @@ EOF
 
 ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
 
-# --- AUTOMATED XRAY PERMISSION & ROOT OVERRIDE FIX ---
+# Xray Root Override & Permissions Fix
 chmod 644 /usr/local/etc/xray/config.json 2>/dev/null || true
 chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
 mkdir -p /etc/systemd/system/xray.service.d
@@ -442,9 +461,8 @@ cat << 'EOF' > /etc/systemd/system/xray.service.d/override.conf
 User=root
 Group=root
 EOF
-# ----------------------------------------------------
 
-# 12. DEPLOY REPOSITORY FILES (FIXED TO PULL GREGORY & MENU.SH PERFECTLY)
+# 12. DEPLOY REPOSITORY FILES & PATCH MENU SERVICE CHECKS
 echo "[+] Fetching SmartKing Panel Files from GitHub..."
 git clone https://github.com/albertlanc/gregory.git /tmp/gregory_repo
 
@@ -455,8 +473,8 @@ touch /etc/smartking/vless-accounts.txt \
       /etc/smartking/shadowsocks-accounts.txt \
       /etc/smartking/ssh-accounts.txt
 
-if [ -f "$REPO_DIR/config/nginx-default.conf" ]; then
-    cp -f $REPO_DIR/config/nginx-default.conf /etc/nginx/sites-available/default
+if [ -f "/tmp/gregory_repo/config/nginx-default.conf" ]; then
+    cp -f /tmp/gregory_repo/config/nginx-default.conf /etc/nginx/sites-available/default
 fi
 sed -i "s/example.com/$DOMAIN/g" /etc/nginx/sites-available/default 2>/dev/null || true
 
@@ -471,7 +489,10 @@ done
 
 chmod +x /etc/smartking/account_templates.sh /etc/smartking/menus/*.sh 2>/dev/null || true
 
-# Hardcode explicit mappings matching your working VM layout
+# Automatically patch openvpn check to openvpn@server in menu.sh
+sed -i 's/systemctl is-active openvpn/systemctl is-active openvpn@server/g' /etc/smartking/menus/menu.sh 2>/dev/null || true
+
+# Hardcode explicit mappings matching working VM layout
 ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu
 cp /etc/smartking/menus/menu.sh /etc/smartking/menu.sh 2>/dev/null || true
 chmod +x /etc/smartking/menu.sh /usr/local/bin/menu
@@ -479,6 +500,7 @@ chmod +x /etc/smartking/menu.sh /usr/local/bin/menu
 rm -rf /tmp/gregory_repo
 
 # 13. AUTO-KILL EXPIRY DAEMON
+REPO_DIR=$(pwd)
 if [ -f "$REPO_DIR/bin/smartking-expiry" ]; then
     cp -f $REPO_DIR/bin/smartking-expiry /usr/local/bin/smartking-expiry
     chmod +x /usr/local/bin/smartking-expiry
@@ -488,8 +510,8 @@ fi
 # 14. START ALL SERVICES
 echo "[+] Starting all Elite Services..."
 systemctl daemon-reload
-systemctl enable haproxy nginx xray stunnel4 dropbear openvpn hysteria-server slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
-systemctl restart haproxy nginx xray stunnel4 dropbear slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl enable haproxy nginx xray stunnel4 dropbear openvpn@server hysteria-server slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
+systemctl restart haproxy nginx xray stunnel4 dropbear openvpn@server slowdns sshws-final-bridge squid badvpn-7100 badvpn-7200 badvpn-7300 netfilter-persistent cron
 
 clear
 echo "======================================================"
