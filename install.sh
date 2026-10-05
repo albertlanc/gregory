@@ -433,6 +433,17 @@ EOF
 
 ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
 
+# --- AUTOMATED XRAY PERMISSION & ROOT OVERRIDE FIX ---
+chmod 644 /usr/local/etc/xray/config.json 2>/dev/null || true
+chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
+mkdir -p /etc/systemd/system/xray.service.d
+cat << 'EOF' > /etc/systemd/system/xray.service.d/override.conf
+[Service]
+User=root
+Group=root
+EOF
+# ----------------------------------------------------
+
 # 12. DEPLOY REPOSITORY FILES (FIXED TO PULL GREGORY & MENU.SH PERFECTLY)
 echo "[+] Fetching SmartKing Panel Files from GitHub..."
 git clone https://github.com/albertlanc/gregory.git /tmp/gregory_repo
