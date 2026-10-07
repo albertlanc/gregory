@@ -15,7 +15,8 @@ echo ""
 echo "[+] Verifying Server License..."
 SERVER_IP=$(curl -s http://ipv4.icanhazip.com)
 
-LICENSE_URL="https://raw.githubusercontent.com/albertlanc/gregory/refs/heads/main/licensed_ips.txt"
+# Add timestamp to bypass GitHub caching
+LICENSE_URL="https://raw.githubusercontent.com/albertlanc/gregory/refs/heads/main/licensed_ips.txt?nocache=$(date +%s)"
 AUTH_CHECK=$(curl -sL "$LICENSE_URL" | grep -w "$SERVER_IP")
 
 if [ -z "$AUTH_CHECK" ]; then
@@ -44,13 +45,42 @@ echo "$DOMAIN" > /etc/smartking/domain
 echo "$NS_DOMAIN" > /etc/slowdns/nsdomain
 echo "$NS_DOMAIN" > /etc/smartking/nsdomain
 
-# 1. CORE DEPENDENCIES
-echo "[+] Installing Elite Libraries & Dependencies..."
-apt-get update -y && apt-get upgrade -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y git curl wget unzip python3 python3-pip \
-nginx cron uuid-runtime tzdata sed gawk stunnel4 dropbear openvpn easy-rsa socat \
-iptables iptables-persistent netfilter-persistent cmake make gcc g++ build-essential \
-libsqlite3-dev libssl-dev squid ufw sslh haproxy
+# ==============================================================================
+# 1. CORE DEPENDENCIES, DNS FIX & VERIFICATION ENGINE
+# ==============================================================================
+echo "[+] Configuring Reliable System DNS..."
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+echo "[+] Installing Elite Libraries & Dependencies (With Auto-Retry)..."
+apt-get clean
+apt-get update -y --fix-missing
+
+PACKAGES="git curl wget unzip python3 python3-pip nginx cron uuid-runtime tzdata sed gawk stunnel4 dropbear openvpn easy-rsa socat iptables iptables-persistent netfilter-persistent cmake make gcc g++ build-essential libsqlite3-dev libssl-dev squid ufw sslh haproxy"
+
+# Auto-Retry Loop: Attempt installation up to 3 times if network drops
+for i in {1..3}; do
+    DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES && break
+    echo "[!] Package installation interrupted. Retrying... ($i/3)"
+    sleep 3
+    apt-get update -y --fix-missing
+done
+
+# Strict Verification: Check if critical commands were successfully installed
+echo "[+] Verifying critical libraries..."
+for pkg in cmake make haproxy nginx dropbear stunnel4 curl iptables netfilter-persistent; do
+    if ! command -v $pkg >/dev/null 2>&1 && [ ! -d "/etc/$pkg" ]; then
+        echo "[!] Missing library: $pkg. Forcing individual installation..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing $pkg
+        
+        # Halt script to prevent cascading errors if it still fails
+        if ! command -v $pkg >/dev/null 2>&1 && [ ! -d "/etc/$pkg" ]; then
+            echo "[X] FATAL ERROR: '$pkg' could not be installed. Check server internet."
+            exit 1
+        fi
+    fi
+done
+echo "[+] All core libraries installed successfully!"
 
 # 2. IP FORWARDING
 echo "[+] Configuring Kernel IP Forwarding..."
@@ -224,9 +254,10 @@ systemctl enable sshws-final-bridge
 
 # 8. DROPBEAR & MULTI-PORT STUNNEL
 echo "[+] Configuring Dropbear & Stunnel..."
-sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
-sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=109/g' /etc/default/dropbear
-sed -i 's/-w//g' /etc/default/dropbear
+mkdir -p /etc/default /etc/stunnel
+sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear 2>/dev/null || echo 'NO_START=0' > /etc/default/dropbear
+sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=109/g' /etc/default/dropbear 2>/dev/null || echo 'DROPBEAR_PORT=109' >> /etc/default/dropbear
+sed -i 's/-w//g' /etc/default/dropbear 2>/dev/null
 grep -q 'DROPBEAR_EXTRA_ARGS="-p 143"' /etc/default/dropbear || echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
 
 cat << INNER_EOF > /etc/stunnel/stunnel.conf
@@ -250,11 +281,11 @@ connect = 127.0.0.1:109
 accept = 992
 connect = 127.0.0.1:1194
 INNER_EOF
-sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || echo 'ENABLED=1' > /etc/default/stunnel4
 
 # 9. OPENVPN CONFIG SERVER & BASE SETUP
 echo "[+] Configuring Nginx OpenVPN Port 81 Server & Base OpenVPN..."
-mkdir -p /var/www/html/ovpn /etc/openvpn
+mkdir -p /var/www/html/ovpn /etc/openvpn /etc/nginx/sites-available /etc/nginx/sites-enabled
 cat << 'INNER_EOF' > /etc/nginx/sites-available/ovpn
 server {
     listen 81;
@@ -293,7 +324,7 @@ echo "[+] Configuring UDP Custom Routing rules..."
 iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-netfilter-persistent save
+netfilter-persistent save 2>/dev/null || true
 
 # 11. HAPROXY & XRAY CORE WITH WORKING MASTER VLESS FALLBACKS
 echo "[+] Installing Xray Core & Hysteria 2..."
@@ -301,6 +332,7 @@ bash <(curl -fsSL https://app.hysteria.network/get.sh)
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
 echo -e "[*] Configuring HAProxy Multiplexer..."
+mkdir -p /etc/haproxy
 cat << 'EOF' > /etc/haproxy/haproxy.cfg
 global
     log /dev/log local0
