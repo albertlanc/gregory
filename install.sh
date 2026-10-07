@@ -496,8 +496,16 @@ done
 
 chmod +x /etc/smartking/account_templates.sh /etc/smartking/menus/*.sh 2>/dev/null || true
 
-# Automatically patch openvpn check to openvpn@server in menu.sh
+# --- AUTOMATIC PATCHES FOR REPOSITORY MENUS ---
+# 1. Patch openvpn check to openvpn@server
 sed -i 's/systemctl is-active openvpn/systemctl is-active openvpn@server/g' /etc/smartking/menus/menu.sh 2>/dev/null || true
+
+# 2. Patch SSH user creation to use valid /usr/sbin/nologin shell for Dropbear
+sed -i 's/-s \/bin\/false/-s \/usr\/sbin\/nologin/g' /etc/smartking/menus/menu-ssh.sh 2>/dev/null || true
+
+# 3. Ensure the shell is registered system-wide
+grep -q "/usr/sbin/nologin" /etc/shells || echo "/usr/sbin/nologin" >> /etc/shells
+# ----------------------------------------------
 
 # Hardcode explicit mappings matching working VM layout
 ln -sf /etc/smartking/menus/menu.sh /usr/local/bin/menu
